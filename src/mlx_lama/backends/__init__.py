@@ -66,7 +66,7 @@ def get_default_backend() -> Optional[Backend]:
     _load_backends()
 
     # Priority order
-    for name in ["mlx-lm", "vllm", "ollama"]:
+    for name in ["mlx-lm", "vllm-mlx", "ollama"]:
         if name in _backends:
             backend = _backends[name]()
             if backend.is_available():

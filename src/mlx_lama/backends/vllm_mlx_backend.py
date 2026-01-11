@@ -11,12 +11,12 @@ from . import register_backend
 class VllmMlxBackend(Backend):
     """Backend using vllm-mlx for high-throughput inference."""
 
-    name = "vllm"
-    description = "vLLM backend - continuous batching, multi-user"
+    name = "vllm-mlx"
+    description = "vLLM-MLX backend - continuous batching, multi-user"
 
     # Detection configuration
-    python_packages = ["vllm", "vllm_mlx", "vllm-mlx"]
-    binary_names = ["vllm"]
+    python_packages = ["vllm_mlx", "vllm-mlx"]
+    binary_names = []
 
     # Installation options
     install_options = [
@@ -59,22 +59,32 @@ class VllmMlxBackend(Backend):
     ) -> Generator[str, None, None]:
         """Generate text using vllm-mlx."""
         try:
-            from vllm import LLM, SamplingParams
-        except ImportError:
+            from vllm_mlx import EngineCore, SamplingParams
+            from mlx_lm import load
+        except ImportError as e:
             raise RuntimeError(
-                "vllm-mlx is not installed. Install with: uv add vllm-mlx"
+                f"vllm-mlx or mlx-lm is not installed. Install with: uv add vllm-mlx mlx-lm. Error: {e}"
             )
 
-        llm = LLM(model=model_path)
+        # Load model and tokenizer using mlx-lm
+        model, tokenizer = load(model_path)
+
+        # Create engine
+        engine = EngineCore(model, tokenizer)
+
         sampling_params = SamplingParams(
             max_tokens=max_tokens,
             temperature=temperature,
         )
 
-        outputs = llm.generate([prompt], sampling_params)
+        try:
+            # Use synchronous batch generation
+            outputs = engine.generate_batch_sync([prompt], sampling_params)
 
-        for output in outputs:
-            yield output.outputs[0].text
+            for output in outputs:
+                yield output.output_text
+        finally:
+            engine.close()
 
     def serve(
         self,
@@ -82,17 +92,18 @@ class VllmMlxBackend(Backend):
         host: str = "127.0.0.1",
         port: int = 8000,
     ) -> subprocess.Popen:
-        """Start vllm-mlx OpenAI-compatible server."""
+        """Start vllm-mlx OpenAI-compatible server with continuous batching."""
         cmd = [
             sys.executable,
             "-m",
-            "vllm.entrypoints.openai.api_server",
+            "vllm_mlx.server",
             "--model",
             model_path,
             "--host",
             host,
             "--port",
             str(port),
+            "--continuous-batching",
         ]
 
         process = subprocess.Popen(
@@ -105,4 +116,4 @@ class VllmMlxBackend(Backend):
 
 
 # Register this backend
-register_backend("vllm", VllmMlxBackend)
+register_backend("vllm-mlx", VllmMlxBackend)
