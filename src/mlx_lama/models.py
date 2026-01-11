@@ -497,10 +497,8 @@ def serve_model(
                         request_id,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
+                        latency_ms=latency_ms,
                     )
-                    # Manually set latency since start/finish happen together
-                    if collector._completed_requests:
-                        collector._completed_requests[-1].latency_ms = latency_ms
 
                 # Start proxy in background thread on user-specified port
                 import uvicorn

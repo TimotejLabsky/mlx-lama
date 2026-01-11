@@ -103,7 +103,8 @@ class MlxLmBackend(Backend):
         cmd = [
             sys.executable,
             "-m",
-            "mlx_lm.server",
+            "mlx_lm",
+            "server",
             "--model",
             model_path,
             "--host",
@@ -114,8 +115,8 @@ class MlxLmBackend(Backend):
 
         process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
         return process

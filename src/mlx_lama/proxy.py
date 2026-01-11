@@ -1,12 +1,13 @@
 """Lightweight stats-capturing proxy for backend servers."""
 
+import json
 import time
 from collections.abc import Callable
 
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 
@@ -33,43 +34,129 @@ def create_proxy_app(
         # Read request body
         body = await request.body()
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            # Forward request
-            response = await client.request(
+        # Check if this is a streaming request
+        is_streaming = False
+        try:
+            body_json = json.loads(body)
+            is_streaming = body_json.get("stream", False)
+        except Exception:
+            pass
+
+        if is_streaming:
+            # Handle streaming response - keep client alive during streaming
+            client = httpx.AsyncClient(timeout=300.0)
+            req = client.build_request(
                 method=request.method,
                 url=url,
                 headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
                 content=body,
             )
+            response = await client.send(req, stream=True)
 
-            latency_ms = (time.time() - start_time) * 1000
-
-            # Extract usage from JSON responses
             prompt_tokens = 0
             completion_tokens = 0
 
-            if response.headers.get("content-type", "").startswith("application/json"):
+            async def stream_generator():
+                nonlocal prompt_tokens, completion_tokens
                 try:
-                    data = response.json()
-                    if "usage" in data:
-                        prompt_tokens = data["usage"].get("prompt_tokens", 0)
-                        completion_tokens = data["usage"].get("completion_tokens", 0)
-                except Exception:
-                    pass
+                    async for chunk in response.aiter_bytes():
+                        # Try to parse SSE data for usage info
+                        try:
+                            chunk_str = chunk.decode("utf-8")
+                            for line in chunk_str.split("\n"):
+                                if line.startswith("data: ") and line != "data: [DONE]":
+                                    data = json.loads(line[6:])
+                                    if "usage" in data:
+                                        prompt_tokens = data["usage"].get("prompt_tokens", 0)
+                                        completion_tokens = data["usage"].get(
+                                            "completion_tokens", 0
+                                        )
+                        except Exception:
+                            pass
+                        yield chunk
+                finally:
+                    await response.aclose()
+                    await client.aclose()
 
-            # Notify callback
-            if on_request_complete and "/v1/" in path:
-                on_request_complete(path, prompt_tokens, completion_tokens, latency_ms)
+                    # Report stats after stream completes
+                    latency_ms = (time.time() - start_time) * 1000
+                    if on_request_complete and "/v1/" in path:
+                        on_request_complete(path, prompt_tokens, completion_tokens, latency_ms)
 
-            return JSONResponse(
-                content=response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
+            return StreamingResponse(
+                stream_generator(),
                 status_code=response.status_code,
-                headers={k: v for k, v in response.headers.items() if k.lower() not in ("content-length", "content-encoding", "transfer-encoding")},
+                headers={
+                    k: v
+                    for k, v in response.headers.items()
+                    if k.lower()
+                    not in ("content-length", "content-encoding", "transfer-encoding")
+                },
+                media_type=response.headers.get("content-type", "text/event-stream"),
             )
+        else:
+            # Handle non-streaming response
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                response = await client.request(
+                    method=request.method,
+                    url=url,
+                    headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
+                    content=body,
+                )
+
+                latency_ms = (time.time() - start_time) * 1000
+
+                # Extract usage from JSON responses
+                prompt_tokens = 0
+                completion_tokens = 0
+
+                if response.headers.get("content-type", "").startswith("application/json"):
+                    try:
+                        data = response.json()
+                        if "usage" in data:
+                            prompt_tokens = data["usage"].get("prompt_tokens", 0)
+                            completion_tokens = data["usage"].get("completion_tokens", 0)
+                    except Exception:
+                        pass
+
+                # Notify callback
+                if on_request_complete and "/v1/" in path:
+                    on_request_complete(path, prompt_tokens, completion_tokens, latency_ms)
+
+                content_type = response.headers.get("content-type", "")
+                if content_type.startswith("application/json"):
+                    return JSONResponse(
+                        content=response.json(),
+                        status_code=response.status_code,
+                        headers={
+                            k: v
+                            for k, v in response.headers.items()
+                            if k.lower()
+                            not in ("content-length", "content-encoding", "transfer-encoding")
+                        },
+                    )
+                else:
+                    from starlette.responses import Response
+
+                    return Response(
+                        content=response.content,
+                        status_code=response.status_code,
+                        headers={
+                            k: v
+                            for k, v in response.headers.items()
+                            if k.lower()
+                            not in ("content-length", "content-encoding", "transfer-encoding")
+                        },
+                        media_type=content_type,
+                    )
 
     # Routes - catch all
     routes = [
-        Route("/{path:path}", proxy_request, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]),
+        Route(
+            "/{path:path}",
+            proxy_request,
+            methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+        ),
     ]
 
     return Starlette(routes=routes)

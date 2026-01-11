@@ -43,7 +43,11 @@ class HardwareStats:
     memory_used_gb: float = 0.0
     memory_total_gb: float = 0.0
     memory_percent: float = 0.0
+    memory_min_gb: float = 0.0
+    memory_max_gb: float = 0.0
     gpu_percent: float = 0.0  # Apple Silicon GPU utilization
+    gpu_min: float = 0.0
+    gpu_max: float = 0.0
     cpu_percent: float = 0.0
     temperature_c: float | None = None
     power_w: float | None = None
@@ -59,6 +63,11 @@ class StatsCollector:
         self._total_tokens = 0
         self._total_time = 0.0
         self._start_time = time.time()
+        # Track min/max hardware stats
+        self._memory_min_gb: float | None = None
+        self._memory_max_gb: float = 0.0
+        self._gpu_min: float | None = None
+        self._gpu_max: float = 0.0
 
     def start_request(self, request_id: str, endpoint: str) -> None:
         """Record start of a request."""
@@ -85,6 +94,7 @@ class StatsCollector:
         request_id: str,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        latency_ms: float | None = None,
         error: bool = False,
     ) -> None:
         """Record completion of a request."""
@@ -93,12 +103,17 @@ class StatsCollector:
             req.finished_at = datetime.now()
             req.prompt_tokens = prompt_tokens
             req.completion_tokens = completion_tokens
-            req.latency_ms = (req.finished_at - req.started_at).total_seconds() * 1000
+            # Use provided latency or calculate from timestamps
+            if latency_ms is not None:
+                req.latency_ms = latency_ms
+            else:
+                req.latency_ms = (req.finished_at - req.started_at).total_seconds() * 1000
             req.status = "error" if error else "completed"
 
-            # Track totals
+            # Track totals (only count if we have completion tokens)
             self._total_tokens += completion_tokens
-            self._total_time += req.latency_ms / 1000
+            if completion_tokens > 0:
+                self._total_time += req.latency_ms / 1000
 
             # Move to completed
             self._completed_requests.append(req)
@@ -112,9 +127,8 @@ class StatsCollector:
         active = list(self._requests.values())
         completed = self._completed_requests[-self.max_recent:]
 
-        # Calculate tokens per second
-        elapsed = time.time() - self._start_time
-        tps = self._total_tokens / elapsed if elapsed > 0 else 0.0
+        # Calculate tokens per second (completion tokens / generation time)
+        tps = self._total_tokens / self._total_time if self._total_time > 0 else 0.0
 
         # Calculate average latency
         latencies = [r.latency_ms for r in completed if r.latency_ms > 0]
@@ -197,7 +211,8 @@ class StatsCollector:
 
                 used_pages = pages_active + pages_wired + pages_compressed
                 stats.memory_used_gb = (used_pages * page_size) / (1024**3)
-                stats.memory_percent = (stats.memory_used_gb / stats.memory_total_gb) * 100 if stats.memory_total_gb > 0 else 0
+                if stats.memory_total_gb > 0:
+                    stats.memory_percent = (stats.memory_used_gb / stats.memory_total_gb) * 100
 
         except Exception:
             pass
@@ -238,8 +253,25 @@ class StatsCollector:
         except Exception:
             pass
 
-        # Note: GPU stats not available without macmon
-        # stats.gpu_percent remains 0.0 (will show N/A in UI)
+        # Track min/max memory
+        if stats.memory_used_gb > 0:
+            if self._memory_min_gb is None:
+                self._memory_min_gb = stats.memory_used_gb
+            else:
+                self._memory_min_gb = min(self._memory_min_gb, stats.memory_used_gb)
+            self._memory_max_gb = max(self._memory_max_gb, stats.memory_used_gb)
+            stats.memory_min_gb = self._memory_min_gb
+            stats.memory_max_gb = self._memory_max_gb
+
+        # Track min/max GPU
+        if stats.gpu_percent > 0:
+            if self._gpu_min is None:
+                self._gpu_min = stats.gpu_percent
+            else:
+                self._gpu_min = min(self._gpu_min, stats.gpu_percent)
+            self._gpu_max = max(self._gpu_max, stats.gpu_percent)
+            stats.gpu_min = self._gpu_min
+            stats.gpu_max = self._gpu_max
 
         return stats
 

@@ -170,7 +170,7 @@ def stop_server(model: Optional[str] = None) -> None:
 def wait_for_server(
     host: str,
     port: int,
-    timeout: float = 30.0,
+    timeout: float = 60.0,
     interval: float = 0.5,
 ) -> bool:
     """Wait for a server to be ready.

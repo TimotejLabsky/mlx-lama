@@ -1,7 +1,6 @@
 """Live TUI display for server monitoring."""
 
 import threading
-from typing import Optional
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -9,7 +8,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .stats import StatsCollector, get_stats_collector, InferenceStats, HardwareStats
+from .stats import HardwareStats, InferenceStats, StatsCollector, get_stats_collector
 
 
 def format_tokens(n: int) -> str:
@@ -79,17 +78,20 @@ def build_inference_panel(stats: InferenceStats) -> Panel:
     table.add_column(justify="right", style="cyan")
 
     # Row 1: Request counts
+    active_style = "yellow bold" if stats.active_requests > 0 else "white"
+    queue_style = "red bold" if stats.queued_requests > 0 else "white"
     table.add_row(
         Text("Requests:", style="dim"),
         Text(str(stats.total_requests), style="white bold"),
         Text("Active:", style="dim"),
-        Text(str(stats.active_requests), style="yellow bold" if stats.active_requests > 0 else "white"),
+        Text(str(stats.active_requests), style=active_style),
         Text("Queue:", style="dim"),
-        Text(str(stats.queued_requests), style="red bold" if stats.queued_requests > 0 else "white"),
+        Text(str(stats.queued_requests), style=queue_style),
     )
 
     # Row 2: Performance metrics
-    tps_style = "green bold" if stats.tokens_per_second > 30 else "yellow bold" if stats.tokens_per_second > 10 else "white"
+    tps = stats.tokens_per_second
+    tps_style = "green bold" if tps > 30 else "yellow bold" if tps > 10 else "white"
     table.add_row(
         Text("Tokens/s:", style="dim"),
         Text(f"{stats.tokens_per_second:.1f}", style=tps_style),
@@ -117,19 +119,25 @@ def build_hardware_panel(stats: HardwareStats) -> Panel:
     """Build the hardware stats panel."""
     table = Table.grid(padding=(0, 2))
     table.add_column(justify="left", width=12)
-    table.add_column(justify="right", width=18)
-    table.add_column(justify="left", width=24)
-    table.add_column(justify="right", width=8)
+    table.add_column(justify="right", width=22)
+    table.add_column(justify="left", width=20)
+    table.add_column(justify="right", width=16)
 
     # Memory bar color based on usage
-    mem_color = "green" if stats.memory_percent < 70 else "yellow" if stats.memory_percent < 90 else "red"
-    mem_bar = create_progress_bar(stats.memory_percent, width=16, filled_color=mem_color)
+    mp = stats.memory_percent
+    mem_color = "green" if mp < 70 else "yellow" if mp < 90 else "red"
+    mem_bar = create_progress_bar(mp, width=16, filled_color=mem_color)
+
+    # Memory min/max display
+    mem_minmax = ""
+    if stats.memory_min_gb > 0 and stats.memory_max_gb > 0:
+        mem_minmax = f"↓{stats.memory_min_gb:.1f} ↑{stats.memory_max_gb:.1f}"
 
     table.add_row(
         Text("Memory:", style="dim"),
         Text(f"{stats.memory_used_gb:.1f} / {stats.memory_total_gb:.0f} GB", style="white"),
         mem_bar,
-        Text(f"{stats.memory_percent:.0f}%", style=mem_color),
+        Text(mem_minmax, style="dim") if mem_minmax else Text(f"{mp:.0f}%", style=mem_color),
     )
 
     # CPU bar
@@ -143,23 +151,28 @@ def build_hardware_panel(stats: HardwareStats) -> Panel:
         Text(f"{stats.cpu_percent:.0f}%", style=cpu_color),
     )
 
-    # GPU (estimated/placeholder for now)
+    # GPU
     gpu_percent = stats.gpu_percent if stats.gpu_percent > 0 else 0
     gpu_color = "green" if gpu_percent < 70 else "yellow" if gpu_percent < 90 else "red"
     gpu_bar = create_progress_bar(gpu_percent, width=16, filled_color=gpu_color)
 
     gpu_label = f"{gpu_percent:.0f}%" if gpu_percent > 0 else "N/A"
+    gpu_minmax = ""
+    if stats.gpu_min > 0 and stats.gpu_max > 0:
+        gpu_minmax = f"↓{stats.gpu_min:.0f}% ↑{stats.gpu_max:.0f}%"
+
     table.add_row(
         Text("GPU:", style="dim"),
         Text(gpu_label, style="white" if gpu_percent > 0 else "dim"),
         gpu_bar if gpu_percent > 0 else Text("░" * 16, style="grey37"),
-        Text(gpu_label, style=gpu_color if gpu_percent > 0 else "dim"),
+        Text(gpu_minmax, style="dim") if gpu_minmax else Text(gpu_label, style=gpu_color),
     )
 
     # Temperature and power (if available)
     extras = []
     if stats.temperature_c:
-        temp_style = "green" if stats.temperature_c < 70 else "yellow" if stats.temperature_c < 85 else "red"
+        tc = stats.temperature_c
+        temp_style = "green" if tc < 70 else "yellow" if tc < 85 else "red"
         extras.append(Text(f"Temp: {stats.temperature_c:.0f}°C", style=temp_style))
     if stats.power_w:
         extras.append(Text(f"Power: {stats.power_w:.0f}W", style="white"))
@@ -256,9 +269,9 @@ class LiveTop:
         self.refresh_rate = refresh_rate
         self.collector = get_stats_collector()
         self._stop_event = threading.Event()
-        self._live: Optional[Live] = None
+        self._live: Live | None = None
 
-    def start(self, console: Optional[Console] = None) -> Live:
+    def start(self, console: Console | None = None) -> Live:
         """Start the live display and return the Live context."""
         if console is None:
             console = Console()
