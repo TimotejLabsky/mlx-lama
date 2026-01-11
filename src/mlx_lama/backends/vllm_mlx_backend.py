@@ -4,7 +4,7 @@ import subprocess
 import sys
 from typing import Generator
 
-from .base import Backend, BackendCapabilities
+from .base import Backend, BackendCapabilities, InstallOption, InstallMethod
 from . import register_backend
 
 
@@ -14,16 +14,31 @@ class VllmMlxBackend(Backend):
     name = "vllm"
     description = "vLLM backend - continuous batching, multi-user"
 
-    def is_available(self) -> bool:
-        """Check if vllm-mlx is installed."""
-        try:
-            # Try importing vllm-mlx specific module
-            # Note: The actual import may vary based on vllm-mlx package structure
-            import vllm  # noqa: F401
+    # Detection configuration
+    python_packages = ["vllm", "vllm_mlx", "vllm-mlx"]
+    binary_names = ["vllm"]
 
-            return True
-        except ImportError:
-            return False
+    # Installation options
+    install_options = [
+        InstallOption(
+            method=InstallMethod.UV,
+            command="uv add vllm-mlx",
+            description="Install vllm-mlx with uv",
+            packages=["vllm-mlx"],
+        ),
+        InstallOption(
+            method=InstallMethod.PIP,
+            command="pip install vllm-mlx",
+            description="Install vllm-mlx with pip",
+            packages=["vllm-mlx"],
+        ),
+        InstallOption(
+            method=InstallMethod.MANUAL,
+            command="git clone https://github.com/vllm-project/vllm-metal && cd vllm-metal && pip install -e .",
+            description="Install from source (vllm-metal)",
+            packages=[],
+        ),
+    ]
 
     def capabilities(self) -> BackendCapabilities:
         """vLLM-MLX capabilities."""
@@ -42,11 +57,7 @@ class VllmMlxBackend(Backend):
         temperature: float = 0.7,
         stream: bool = True,
     ) -> Generator[str, None, None]:
-        """Generate text using vllm-mlx.
-
-        Note: vLLM is primarily designed for server mode.
-        This is a simplified implementation for direct generation.
-        """
+        """Generate text using vllm-mlx."""
         try:
             from vllm import LLM, SamplingParams
         except ImportError:

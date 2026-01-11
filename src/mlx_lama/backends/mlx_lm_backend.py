@@ -4,7 +4,7 @@ import subprocess
 import sys
 from typing import Generator
 
-from .base import Backend, BackendCapabilities
+from .base import Backend, BackendCapabilities, InstallOption, InstallMethod
 from . import register_backend
 
 
@@ -14,20 +14,37 @@ class MlxLmBackend(Backend):
     name = "mlx-lm"
     description = "Native MLX backend - fast, simple, single-user"
 
-    def is_available(self) -> bool:
-        """Check if mlx-lm is installed."""
-        try:
-            import mlx_lm  # noqa: F401
+    # Detection configuration
+    python_packages = ["mlx_lm", "mlx-lm"]
+    binary_names = ["mlx_lm.server", "mlx_lm.generate", "mlx_lm"]  # Brew installs mlx_lm.* binaries
 
-            return True
-        except ImportError:
-            return False
+    # Installation options
+    install_options = [
+        InstallOption(
+            method=InstallMethod.BREW,
+            command="brew install mlx-lm",
+            description="Install with Homebrew (recommended)",
+            packages=["mlx-lm"],
+        ),
+        InstallOption(
+            method=InstallMethod.UV,
+            command="uv add mlx-lm",
+            description="Install with uv",
+            packages=["mlx-lm"],
+        ),
+        InstallOption(
+            method=InstallMethod.PIP,
+            command="pip install mlx-lm",
+            description="Install with pip",
+            packages=["mlx-lm"],
+        ),
+    ]
 
     def capabilities(self) -> BackendCapabilities:
         """MLX-LM capabilities."""
         return BackendCapabilities(
             continuous_batching=False,
-            vision_support=False,  # mlx-vlm is separate
+            vision_support=False,
             tool_calling=False,
             max_concurrent=1,
         )

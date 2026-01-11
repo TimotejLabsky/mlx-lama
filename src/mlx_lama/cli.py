@@ -3,6 +3,7 @@
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.panel import Panel
 from typing import Optional
 
 from . import __version__
@@ -172,27 +173,39 @@ def stop(
 
 
 @app.command()
-def backends() -> None:
-    """List available backends."""
+def backends(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed info"),
+) -> None:
+    """List available backends and their status."""
     from .backends import get_available_backends
 
     available = get_available_backends()
 
-    table = Table(title="Available Backends")
+    table = Table(title="Backends")
     table.add_column("Name", style="cyan")
-    table.add_column("Status", style="green")
+    table.add_column("Status")
+    table.add_column("Detection", style="dim")
     table.add_column("Batching", justify="center")
     table.add_column("Vision", justify="center")
     table.add_column("Description")
 
     for backend in available:
-        status = "[green]available[/green]" if backend["available"] else "[red]not installed[/red]"
+        if backend["available"]:
+            status = "[green]✓ available[/green]"
+            detection = backend.get("details", backend.get("method", ""))
+            if backend.get("version"):
+                detection = f"{detection} ({backend['version']})"
+        else:
+            status = "[red]✗ not installed[/red]"
+            detection = backend.get("details", "")
+
         batching = "[green]✓[/green]" if backend["batching"] else "[dim]-[/dim]"
         vision = "[green]✓[/green]" if backend["vision"] else "[dim]-[/dim]"
 
         table.add_row(
             backend["name"],
             status,
+            detection[:40] if detection else "",
             batching,
             vision,
             backend["description"],
@@ -200,8 +213,82 @@ def backends() -> None:
 
     console.print(table)
 
+    # Show install hints for unavailable backends
+    unavailable = [b for b in available if not b["available"]]
+    if unavailable and verbose:
+        console.print("\n[bold]Installation options:[/bold]")
+        for backend in unavailable:
+            if backend.get("install_options"):
+                console.print(f"\n[cyan]{backend['name']}[/cyan]:")
+                for opt in backend["install_options"]:
+                    console.print(f"  [dim]{opt.description}:[/dim]")
+                    console.print(f"    [green]{opt.command}[/green]")
+
     config = get_config()
     console.print(f"\n[dim]Default backend:[/dim] [bold]{config.default_backend}[/bold]")
+
+    if unavailable:
+        console.print(
+            "\n[dim]Tip: Run [/dim][bold]mlx-lama install <backend>[/bold][dim] "
+            "to install a backend[/dim]"
+        )
+
+
+@app.command()
+def install(
+    backend: str = typer.Argument(..., help="Backend to install (mlx-lm, vllm, ollama)"),
+    method: Optional[str] = typer.Option(
+        None,
+        "--method",
+        "-m",
+        help="Installation method (uv, pip, brew, manual)",
+    ),
+) -> None:
+    """Install a backend."""
+    from .backends import get_available_backends, install_backend
+    from .progress import print_success, print_error, print_info
+
+    # Check if already installed
+    backends_list = get_available_backends()
+    for b in backends_list:
+        if b["name"] == backend:
+            if b["available"]:
+                console.print(
+                    f"[yellow]Backend '{backend}' is already installed[/yellow]"
+                )
+                console.print(f"[dim]Detected via: {b.get('details', 'unknown')}[/dim]")
+                return
+            break
+    else:
+        print_error(f"Unknown backend: {backend}")
+        console.print("\nAvailable backends: mlx-lm, vllm, ollama")
+        raise typer.Exit(1)
+
+    # Show available install methods
+    for b in backends_list:
+        if b["name"] == backend and b.get("install_options"):
+            if not method:
+                console.print(f"\n[bold]Installing {backend}...[/bold]\n")
+                console.print("[dim]Available methods:[/dim]")
+                for i, opt in enumerate(b["install_options"]):
+                    marker = "[green]→[/green]" if i == 0 else " "
+                    console.print(
+                        f"  {marker} {opt.method.value}: {opt.description}"
+                    )
+                console.print()
+
+            try:
+                success = install_backend(backend, method=method)
+                if success:
+                    print_success(f"Backend '{backend}' installed successfully!")
+                    print_info("Run 'mlx-lama backends' to verify.")
+                else:
+                    print_error(f"Failed to install '{backend}'")
+                    raise typer.Exit(1)
+            except ValueError as e:
+                print_error(str(e))
+                raise typer.Exit(1)
+            break
 
 
 if __name__ == "__main__":
