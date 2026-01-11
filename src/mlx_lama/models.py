@@ -1,5 +1,6 @@
 """Model management - pull, list, remove, show, run, serve."""
 
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -7,12 +8,11 @@ from typing import Optional
 
 from huggingface_hub import snapshot_download, HfApi
 from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn
 from rich.prompt import Confirm
 
-from .config import get_config
 from .registry import get_registry
 from .progress import (
-    create_download_progress,
     print_success,
     print_error,
     print_warning,
@@ -25,37 +25,78 @@ from .progress import (
 console = Console()
 
 
-def get_model_path(model: str) -> Path:
-    """Get the local path for a model."""
-    config = get_config()
+def get_hf_cache_dir() -> Path:
+    """Get the HuggingFace cache directory."""
+    return Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+
+
+def get_model_repo(model: str) -> str:
+    """Resolve model alias to HuggingFace repo."""
     registry = get_registry()
+    model_info = registry.get(model)
+    if model_info:
+        return model_info.repo
+    return model
 
-    # Resolve alias to repo
-    repo = registry.resolve(model)
 
-    # Create safe directory name from repo
-    safe_name = repo.replace("/", "--")
-    return config.models_dir / safe_name
+def get_model_cache_path(repo: str) -> Path | None:
+    """Get the cached path for a model repo, if it exists."""
+    cache_dir = get_hf_cache_dir()
+    # HuggingFace cache uses models--org--name format
+    safe_name = f"models--{repo.replace('/', '--')}"
+    model_dir = cache_dir / safe_name
+
+    if model_dir.exists():
+        # Find the snapshot directory
+        snapshots_dir = model_dir / "snapshots"
+        if snapshots_dir.exists():
+            # Get the most recent snapshot
+            snapshots = list(snapshots_dir.iterdir())
+            if snapshots:
+                return snapshots[-1]
+    return None
 
 
 def is_model_downloaded(model: str) -> bool:
-    """Check if a model is already downloaded."""
-    path = get_model_path(model)
-    return path.exists() and (path / "config.json").exists()
+    """Check if a model is already downloaded in HuggingFace cache."""
+    repo = get_model_repo(model)
+    cache_path = get_model_cache_path(repo)
+
+    if cache_path is None:
+        return False
+
+    # Check for essential files
+    return (cache_path / "config.json").exists()
 
 
-def pull_model(model: str, backend: Optional[str] = None) -> Path:
+def get_model_path(model: str) -> Path:
+    """Get the local path for a model (from HF cache)."""
+    repo = get_model_repo(model)
+    cache_path = get_model_cache_path(repo)
+
+    if cache_path:
+        return cache_path
+
+    # Return expected path even if not downloaded
+    cache_dir = get_hf_cache_dir()
+    safe_name = f"models--{repo.replace('/', '--')}"
+    return cache_dir / safe_name / "snapshots" / "main"
+
+
+def pull_model(model: str, backend: Optional[str] = None) -> Path:  # noqa: ARG001
     """Download a model from HuggingFace.
 
+    Downloads to the shared HuggingFace cache (~/.cache/huggingface/hub/)
+    so models are shared with mlx-lm, vllm-mlx, and other HF tools.
+
     Args:
-        model: Model alias or HuggingFace repo
-        backend: Preferred backend (saved in model config)
+        model: Model alias or HuggingFace repo (e.g., "mlx-community/Qwen2.5-7B-Instruct-4bit")
+        backend: Preferred backend (for future use)
 
     Returns:
         Path to the downloaded model
     """
     registry = get_registry()
-    config = get_config()
 
     # Resolve alias to repo
     model_info = registry.get(model)
@@ -64,39 +105,56 @@ def pull_model(model: str, backend: Optional[str] = None) -> Path:
         print_info(f"Resolving [bold]{model}[/bold] → [blue]{repo}[/blue]")
     else:
         repo = model
-        print_info(f"Using repo: [blue]{repo}[/blue]")
+        print_info(f"Model: [blue]{repo}[/blue]")
 
     # Check if already downloaded
-    model_path = get_model_path(model)
-    if model_path.exists() and (model_path / "config.json").exists():
-        print_warning(f"Model already exists at {model_path}")
-        if not Confirm.ask("Re-download?", default=False):
-            return model_path
+    if is_model_downloaded(model):
+        cache_path = get_model_cache_path(repo)
+        if cache_path:
+            print_warning(f"Model already downloaded")
+            print_info(f"Location: {cache_path}")
+            if not Confirm.ask("Re-download?", default=False):
+                return cache_path
 
-    # Download with progress
-    console.print(f"\n[bold]Downloading {repo}...[/bold]\n")
+    # Get model info from HuggingFace
+    console.print(f"\n[bold]Downloading {repo}...[/bold]")
 
     try:
-        with create_download_progress() as progress:
-            task = progress.add_task(f"Downloading {repo}", total=None)
+        api = HfApi()
+        model_info_hf = api.model_info(repo)
 
-            def progress_callback(current: int, total: int) -> None:
-                progress.update(task, completed=current, total=total)
+        # Calculate total size
+        total_size = sum(s.size for s in model_info_hf.siblings if s.size)
+        if total_size > 0:
+            console.print(f"[dim]Total size: {format_size(total_size)}[/dim]\n")
+    except Exception:
+        total_size = 0
+        console.print()
 
-            # Download using huggingface_hub
-            local_path = snapshot_download(
-                repo_id=repo,
-                local_dir=model_path,
-                local_dir_use_symlinks=False,
-            )
+    try:
+        # Download with progress tracking
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            console=console,
+        ) as progress:
+            progress.add_task("Downloading", total=total_size if total_size > 0 else None)
 
-        print_success(f"Downloaded to {local_path}")
+            # Download using huggingface_hub (uses shared cache)
+            local_path = snapshot_download(repo_id=repo)
 
-        # Get model size
-        size = sum(f.stat().st_size for f in model_path.rglob("*") if f.is_file())
-        print_info(f"Total size: {format_size(size)}")
+        print_success(f"Downloaded successfully!")
+        print_info(f"Location: {local_path}")
 
-        return Path(local_path)
+        # Calculate actual size
+        path = Path(local_path)
+        size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+        print_info(f"Size: {format_size(size)}")
+
+        return path
 
     except Exception as e:
         print_error(f"Failed to download: {e}")
@@ -104,29 +162,51 @@ def pull_model(model: str, backend: Optional[str] = None) -> Path:
 
 
 def get_downloaded_models() -> list[dict]:
-    """Get list of downloaded models with metadata."""
-    config = get_config()
+    """Get list of downloaded models with metadata from HuggingFace cache."""
     models = []
+    cache_dir = get_hf_cache_dir()
 
-    if not config.models_dir.exists():
+    if not cache_dir.exists():
         return models
 
-    for model_dir in config.models_dir.iterdir():
-        if not model_dir.is_dir():
+    # Scan HuggingFace cache for MLX models
+    for model_dir in cache_dir.iterdir():
+        if not model_dir.is_dir() or not model_dir.name.startswith("models--"):
             continue
 
-        config_file = model_dir / "config.json"
+        # Find snapshot directory
+        snapshots_dir = model_dir / "snapshots"
+        if not snapshots_dir.exists():
+            continue
+
+        snapshots = list(snapshots_dir.iterdir())
+        if not snapshots:
+            continue
+
+        # Use most recent snapshot
+        snapshot = snapshots[-1]
+        config_file = snapshot / "config.json"
         if not config_file.exists():
             continue
 
-        # Calculate size
-        size = sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
+        # Check if it's an MLX model (has .safetensors files, typical for MLX)
+        # This is a heuristic - MLX models typically have model.safetensors
+        has_safetensors = any(snapshot.glob("*.safetensors"))
+        if not has_safetensors:
+            continue
+
+        # Calculate size from blobs (actual storage)
+        blobs_dir = model_dir / "blobs"
+        if blobs_dir.exists():
+            size = sum(f.stat().st_size for f in blobs_dir.iterdir() if f.is_file())
+        else:
+            size = sum(f.stat().st_size for f in snapshot.rglob("*") if f.is_file())
 
         # Get modification time
         mtime = datetime.fromtimestamp(model_dir.stat().st_mtime)
 
-        # Convert directory name back to repo format
-        repo_name = model_dir.name.replace("--", "/")
+        # Convert directory name back to repo format (models--org--name -> org/name)
+        repo_name = model_dir.name.replace("models--", "").replace("--", "/")
 
         # Try to find alias
         registry = get_registry()
@@ -138,25 +218,36 @@ def get_downloaded_models() -> list[dict]:
 
         models.append({
             "name": alias or repo_name,
-            "path": str(model_dir),
+            "path": str(snapshot),
             "size": format_size(size),
             "modified": mtime.strftime("%Y-%m-%d %H:%M"),
-            "backend": "mlx-lm",  # TODO: Read from model config
+            "backend": "mlx-lm",
         })
 
     return sorted(models, key=lambda x: x["name"])
 
 
 def remove_model(model: str, force: bool = False) -> None:
-    """Remove a downloaded model."""
-    model_path = get_model_path(model)
+    """Remove a downloaded model from HuggingFace cache."""
+    repo = get_model_repo(model)
+    cache_dir = get_hf_cache_dir()
 
-    if not model_path.exists():
+    # Find the model directory in cache
+    safe_name = f"models--{repo.replace('/', '--')}"
+    model_dir = cache_dir / safe_name
+
+    if not model_dir.exists():
         print_error(f"Model not found: {model}")
         return
 
+    # Calculate size from blobs (actual disk usage)
+    blobs_dir = model_dir / "blobs"
+    if blobs_dir.exists():
+        size = sum(f.stat().st_size for f in blobs_dir.iterdir() if f.is_file())
+    else:
+        size = sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
+
     if not force:
-        size = sum(f.stat().st_size for f in model_path.rglob("*") if f.is_file())
         if not Confirm.ask(
             f"Remove {model} ({format_size(size)})?",
             default=False,
@@ -164,7 +255,7 @@ def remove_model(model: str, force: bool = False) -> None:
             return
 
     with status_spinner(f"Removing {model}..."):
-        shutil.rmtree(model_path)
+        shutil.rmtree(model_dir)
 
     print_success(f"Removed {model}")
 
