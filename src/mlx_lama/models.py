@@ -4,23 +4,29 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from huggingface_hub import snapshot_download, HfApi
+from huggingface_hub import HfApi, snapshot_download
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TransferSpeedColumn,
+)
 from rich.prompt import Confirm
 
-from .registry import get_registry
 from .progress import (
-    print_success,
+    format_size,
     print_error,
-    print_warning,
     print_info,
     print_model_info,
-    format_size,
+    print_success,
+    print_warning,
     status_spinner,
 )
+from .registry import get_registry
 
 console = Console()
 
@@ -83,7 +89,7 @@ def get_model_path(model: str) -> Path:
     return cache_dir / safe_name / "snapshots" / "main"
 
 
-def pull_model(model: str, backend: Optional[str] = None) -> Path:  # noqa: ARG001
+def pull_model(model: str, backend: str | None = None) -> Path:  # noqa: ARG001
     """Download a model from HuggingFace.
 
     Downloads to the shared HuggingFace cache (~/.cache/huggingface/hub/)
@@ -111,7 +117,7 @@ def pull_model(model: str, backend: Optional[str] = None) -> Path:  # noqa: ARG0
     if is_model_downloaded(model):
         cache_path = get_model_cache_path(repo)
         if cache_path:
-            print_warning(f"Model already downloaded")
+            print_warning("Model already downloaded")
             print_info(f"Location: {cache_path}")
             if not Confirm.ask("Re-download?", default=False):
                 return cache_path
@@ -146,7 +152,7 @@ def pull_model(model: str, backend: Optional[str] = None) -> Path:  # noqa: ARG0
             # Download using huggingface_hub (uses shared cache)
             local_path = snapshot_download(repo_id=repo)
 
-        print_success(f"Downloaded successfully!")
+        print_success("Downloaded successfully!")
         print_info(f"Location: {local_path}")
 
         # Calculate actual size
@@ -303,8 +309,8 @@ def show_model(model: str) -> None:
 
 def run_model(
     model: str,
-    prompt: Optional[str] = None,
-    backend: Optional[str] = None,
+    prompt: str | None = None,
+    backend: str | None = None,
 ) -> None:
     """Run a model - interactive chat or one-shot generation."""
     from .backends import get_backend, get_default_backend
@@ -390,11 +396,23 @@ def serve_model(
     model: str,
     host: str = "127.0.0.1",
     port: int = 8000,
-    backend: Optional[str] = None,
+    backend: str | None = None,
+    top: bool = False,
 ) -> None:
     """Start an OpenAI-compatible server for a model."""
     from .backends import get_backend, get_default_backend
-    from .process import save_server_info, wait_for_server
+    from .process import get_running_servers, save_server_info, wait_for_server
+
+    # Check if a server is already running on the requested port
+    running = get_running_servers()
+    for server in running:
+        if server["port"] == port:
+            print_error(
+                f"Server already running on port {port} "
+                f"(model: {server['model']}, PID: {server['pid']})"
+            )
+            console.print(f"[dim]Stop it with: mlx-lama stop {server['model']}[/dim]")
+            return
 
     # Ensure model is downloaded
     if not is_model_downloaded(model):
@@ -430,14 +448,22 @@ def serve_model(
         )
         return
 
+    # When using --top, proxy runs on user port and backend on port+1000
+    if top:
+        backend_port = port + 1000
+        proxy_port = port
+    else:
+        backend_port = port
+        proxy_port = None
+
     console.print(f"\n[bold]Starting server for {model}[/bold]")
     console.print(f"[dim]Backend: {backend_instance.name}[/dim]")
     console.print(f"[dim]Endpoint: http://{host}:{port}[/dim]\n")
 
     try:
-        process = backend_instance.serve(str(model_path), host=host, port=port)
+        process = backend_instance.serve(str(model_path), host=host, port=backend_port)
 
-        # Save server info
+        # Save server info (use user-facing port)
         save_server_info(
             model=model,
             pid=process.pid,
@@ -445,18 +471,89 @@ def serve_model(
             backend=backend_instance.name,
         )
 
-        # Wait for server to be ready
-        if wait_for_server(host, port):
-            print_success(f"Server running at http://{host}:{port}")
-            console.print("\n[dim]Press Ctrl+C to stop[/dim]\n")
+        # Wait for backend server to be ready
+        if wait_for_server(host, backend_port):
+            if top:
+                # Start live monitoring TUI with stats-capturing proxy
+                import asyncio
+                import threading
+                import time
 
-            # Wait for process or keyboard interrupt
-            try:
-                process.wait()
-            except KeyboardInterrupt:
-                console.print("\n[dim]Stopping server...[/dim]")
-                backend_instance.stop_server(process)
-                print_success("Server stopped")
+                from .stats import get_stats_collector, reset_stats_collector
+                from .top import LiveTop
+
+                # Reset stats for fresh start
+                reset_stats_collector()
+                collector = get_stats_collector()
+
+                def on_request_complete(
+                    endpoint: str, prompt_tokens: int, completion_tokens: int, latency_ms: float
+                ):
+                    """Callback from proxy when request completes."""
+                    import uuid
+                    request_id = str(uuid.uuid4())[:8]
+                    collector.start_request(request_id, endpoint)
+                    collector.finish_request(
+                        request_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+                    # Manually set latency since start/finish happen together
+                    if collector._completed_requests:
+                        collector._completed_requests[-1].latency_ms = latency_ms
+
+                # Start proxy in background thread on user-specified port
+                import uvicorn
+
+                from .proxy import create_proxy_app
+
+                backend_url = f"http://{host}:{backend_port}"
+
+                app = create_proxy_app(backend_url, on_request_complete)
+
+                def run_proxy():
+                    config = uvicorn.Config(app, host=host, port=proxy_port, log_level="error")
+                    server = uvicorn.Server(config)
+                    asyncio.run(server.serve())
+
+                proxy_thread = threading.Thread(target=run_proxy, daemon=True)
+                proxy_thread.start()
+
+                # Give proxy a moment to start
+                time.sleep(0.5)
+
+                print_success(f"Server running at http://{host}:{port}")
+
+                live_top = LiveTop(
+                    model=model,
+                    backend=backend_instance.name,
+                    host=host,
+                    port=port,  # Show user-specified port in UI
+                )
+
+                try:
+                    with live_top.start(console):
+                        while process.poll() is None:
+                            live_top.update()
+                            time.sleep(0.5)
+                except KeyboardInterrupt:
+                    pass
+                finally:
+                    live_top.stop()
+                    console.print("\n[dim]Stopping server...[/dim]")
+                    backend_instance.stop_server(process)
+                    print_success("Server stopped")
+            else:
+                # Normal mode (no --top)
+                print_success(f"Server running at http://{host}:{port}")
+                console.print("\n[dim]Press Ctrl+C to stop[/dim]\n")
+
+                try:
+                    process.wait()
+                except KeyboardInterrupt:
+                    console.print("\n[dim]Stopping server...[/dim]")
+                    backend_instance.stop_server(process)
+                    print_success("Server stopped")
         else:
             print_error("Server failed to start")
             process.kill()

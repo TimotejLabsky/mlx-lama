@@ -75,11 +75,14 @@ def serve(
     backend: Optional[str] = typer.Option(
         None, "--backend", "-b", help="Backend to use"
     ),
+    top: bool = typer.Option(
+        False, "--top", "-t", help="Enable live monitoring TUI (like htop)"
+    ),
 ) -> None:
     """Start an OpenAI-compatible API server."""
     from .models import serve_model
 
-    serve_model(model, host=host, port=port, backend=backend)
+    serve_model(model, host=host, port=port, backend=backend, top=top)
 
 
 @app.command("list")
