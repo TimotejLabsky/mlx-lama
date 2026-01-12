@@ -1,6 +1,11 @@
 """Live TUI display for server monitoring."""
 
+import select
+import sys
+import termios
 import threading
+import tty
+from collections.abc import Callable
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -284,11 +289,22 @@ def build_display(
     host: str,
     port: int,
     collector: StatsCollector,
+    status: str = "running",
 ) -> Group:
     """Build the complete display."""
     inference_stats = collector.get_inference_stats()
     hardware_stats = collector.get_hardware_stats()
     log_entries = collector.logs.get_entries()
+
+    # Build footer with status and keys
+    if status == "reloading":
+        footer = Text("Reloading model...", style="yellow bold", justify="center")
+    else:
+        footer = Text(
+            "[r] Reload  [q] Quit",
+            style="dim",
+            justify="center",
+        )
 
     return Group(
         build_header(model, backend, host, port),
@@ -296,8 +312,53 @@ def build_display(
         build_hardware_panel(hardware_stats),
         build_requests_panel(inference_stats),
         build_logs_panel(log_entries),
-        Text("Press Ctrl+C to stop", style="dim", justify="center"),
+        footer,
     )
+
+
+class KeyboardListener(threading.Thread):
+    """Non-blocking keyboard listener for TUI commands."""
+
+    def __init__(self, on_key: Callable[[str], None]):
+        super().__init__(daemon=True)
+        self.on_key = on_key
+        self._stop_event = threading.Event()
+        self._old_settings = None
+
+    def run(self) -> None:
+        """Listen for keyboard input."""
+        try:
+            # Save terminal settings
+            fd = sys.stdin.fileno()
+            self._old_settings = termios.tcgetattr(fd)
+            # Set terminal to raw mode
+            tty.setcbreak(fd)
+
+            while not self._stop_event.is_set():
+                # Check if input is available
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    char = sys.stdin.read(1)
+                    if char:
+                        self.on_key(char.lower())
+
+        except Exception:
+            pass  # Terminal doesn't support raw mode
+        finally:
+            self._restore_terminal()
+
+    def _restore_terminal(self) -> None:
+        """Restore terminal settings."""
+        if self._old_settings:
+            try:
+                fd = sys.stdin.fileno()
+                termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        """Stop the listener."""
+        self._stop_event.set()
+        self._restore_terminal()
 
 
 class LiveTop:
@@ -310,15 +371,31 @@ class LiveTop:
         host: str = "127.0.0.1",
         port: int = 8000,
         refresh_rate: float = 2.0,
+        on_reload: Callable[[], None] | None = None,
+        on_quit: Callable[[], None] | None = None,
     ):
         self.model = model
         self.backend = backend
         self.host = host
         self.port = port
         self.refresh_rate = refresh_rate
+        self.on_reload = on_reload
+        self.on_quit = on_quit
         self.collector = get_stats_collector()
         self._stop_event = threading.Event()
         self._live: Live | None = None
+        self._keyboard_listener: KeyboardListener | None = None
+        self._status = "running"
+
+    def _handle_key(self, key: str) -> None:
+        """Handle keyboard input."""
+        if key == "r" and self.on_reload:
+            self._status = "reloading"
+            self.update()
+            self.on_reload()
+            self._status = "running"
+        elif key == "q" and self.on_quit:
+            self.on_quit()
 
     def start(self, console: Console | None = None) -> Live:
         """Start the live display and return the Live context."""
@@ -332,11 +409,17 @@ class LiveTop:
                 self.host,
                 self.port,
                 self.collector,
+                self._status,
             ),
             console=console,
             refresh_per_second=self.refresh_rate,
             screen=True,  # Use alternate screen (like htop)
         )
+
+        # Start keyboard listener
+        self._keyboard_listener = KeyboardListener(self._handle_key)
+        self._keyboard_listener.start()
+
         return self._live
 
     def update(self) -> None:
@@ -349,11 +432,19 @@ class LiveTop:
                     self.host,
                     self.port,
                     self.collector,
+                    self._status,
                 )
             )
+
+    def set_status(self, status: str) -> None:
+        """Set the status displayed in footer."""
+        self._status = status
+        self.update()
 
     def stop(self) -> None:
         """Stop the live display."""
         self._stop_event.set()
+        if self._keyboard_listener:
+            self._keyboard_listener.stop()
         if self._live:
             self._live.stop()

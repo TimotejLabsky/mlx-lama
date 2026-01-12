@@ -544,25 +544,77 @@ def serve_model(
 
                 print_success(f"Server running at http://{host}:{port}")
 
+                # Track mutable state for reload
+                server_state = {
+                    "process": process,
+                    "log_parser": log_parser,
+                    "should_quit": False,
+                }
+
+                def handle_reload():
+                    """Reload the backend server."""
+                    nonlocal server_state
+                    old_process = server_state["process"]
+                    old_parser = server_state["log_parser"]
+
+                    # Stop current backend
+                    old_parser.stop()
+                    backend_instance.stop_server(old_process)
+
+                    # Clear logs and reset stats for fresh start
+                    collector.logs.clear()
+                    collector.logs.add("Reloading backend...", level="info", source="system")
+
+                    # Start new backend on same port
+                    new_process = backend_instance.serve(
+                        str(model_path), host=host, port=backend_port
+                    )
+
+                    # Start new log parser
+                    new_parser = LogParser(new_process, collector)
+                    new_parser.start()
+
+                    # Wait for new backend to be ready
+                    if wait_for_server(host, backend_port, timeout=120.0):
+                        collector.logs.add(
+                            "Backend reloaded successfully", level="info", source="system"
+                        )
+                    else:
+                        collector.logs.add(
+                            "Backend reload failed!", level="error", source="system"
+                        )
+
+                    server_state["process"] = new_process
+                    server_state["log_parser"] = new_parser
+
+                def handle_quit():
+                    """Handle quit request."""
+                    server_state["should_quit"] = True
+
                 live_top = LiveTop(
                     model=model,
                     backend=backend_instance.name,
                     host=host,
                     port=port,  # Show user-specified port in UI
+                    on_reload=handle_reload,
+                    on_quit=handle_quit,
                 )
 
                 try:
                     with live_top.start(console):
-                        while process.poll() is None:
+                        while (
+                            server_state["process"].poll() is None
+                            and not server_state["should_quit"]
+                        ):
                             live_top.update()
                             time.sleep(0.5)
                 except KeyboardInterrupt:
                     pass
                 finally:
                     live_top.stop()
-                    log_parser.stop()
+                    server_state["log_parser"].stop()
                     console.print("\n[dim]Stopping server...[/dim]")
-                    backend_instance.stop_server(process)
+                    backend_instance.stop_server(server_state["process"])
                     print_success("Server stopped")
             else:
                 # Normal mode (no --top)
