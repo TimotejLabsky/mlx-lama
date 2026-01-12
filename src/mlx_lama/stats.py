@@ -53,6 +53,67 @@ class HardwareStats:
     power_w: float | None = None
 
 
+@dataclass
+class LogEntry:
+    """A single log entry."""
+    timestamp: datetime
+    level: str  # "info", "warning", "error", "debug"
+    message: str
+    source: str = "backend"  # "backend", "proxy", "system"
+
+
+class LogBuffer:
+    """Thread-safe circular buffer for log entries."""
+
+    def __init__(self, max_lines: int = 50):
+        self.max_lines = max_lines
+        self._entries: list[LogEntry] = []
+        self._lock = threading.Lock()
+
+    def add(self, message: str, level: str = "info", source: str = "backend") -> None:
+        """Add a log entry."""
+        entry = LogEntry(
+            timestamp=datetime.now(),
+            level=level,
+            message=message.strip(),
+            source=source,
+        )
+        with self._lock:
+            self._entries.append(entry)
+            if len(self._entries) > self.max_lines:
+                self._entries.pop(0)
+
+    def add_line(self, line: str, source: str = "backend") -> None:
+        """Add a raw log line, detecting level from content."""
+        line = line.strip()
+        if not line:
+            return
+
+        # Detect log level from common patterns
+        level = "info"
+        lower = line.lower()
+        if "error" in lower or "exception" in lower or "traceback" in lower:
+            level = "error"
+        elif "warn" in lower:
+            level = "warning"
+        elif "debug" in lower:
+            level = "debug"
+
+        self.add(line, level=level, source=source)
+
+    def get_entries(self, limit: int | None = None) -> list[LogEntry]:
+        """Get recent log entries."""
+        with self._lock:
+            if limit is None:
+                return list(self._entries)
+            return list(self._entries[-limit:])
+
+    def clear(self) -> None:
+        """Clear all log entries."""
+        with self._lock:
+            self._entries.clear()
+
+
 class StatsCollector:
     """Collects and aggregates performance and hardware stats."""
 
@@ -68,6 +129,13 @@ class StatsCollector:
         self._memory_max_gb: float = 0.0
         self._gpu_min: float | None = None
         self._gpu_max: float = 0.0
+        # Log buffer for TUI display
+        self._log_buffer = LogBuffer(max_lines=50)
+
+    @property
+    def logs(self) -> LogBuffer:
+        """Get the log buffer."""
+        return self._log_buffer
 
     def start_request(self, request_id: str, endpoint: str) -> None:
         """Record start of a request."""
@@ -462,6 +530,7 @@ class LogParser(threading.Thread):
             events = sel.select(timeout=0.1)
             for key, _ in events:
                 stream = key.fileobj
+                source = key.data  # "stdout" or "stderr"
                 if isinstance(stream, io.IOBase):
                     raw_line = stream.readline()
                     if raw_line:
@@ -469,7 +538,10 @@ class LogParser(threading.Thread):
                             line_str = raw_line.decode("utf-8", errors="ignore")
                         else:
                             line_str = str(raw_line)
+                        # Parse for stats
                         self.collector.parse_log_line(line_str)
+                        # Also add to log buffer for TUI display
+                        self.collector.logs.add_line(line_str, source=source)
 
         sel.close()
 

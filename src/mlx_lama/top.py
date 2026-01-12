@@ -8,7 +8,13 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .stats import HardwareStats, InferenceStats, StatsCollector, get_stats_collector
+from .stats import (
+    HardwareStats,
+    InferenceStats,
+    LogEntry,
+    StatsCollector,
+    get_stats_collector,
+)
 
 
 def format_tokens(n: int) -> str:
@@ -231,6 +237,47 @@ def build_requests_panel(stats: InferenceStats) -> Panel:
     return Panel(table, title="[bold cyan]Recent Requests[/bold cyan]", border_style="cyan")
 
 
+def build_logs_panel(logs: list[LogEntry], max_lines: int = 8) -> Panel:
+    """Build the backend logs panel."""
+    table = Table(
+        show_header=False,
+        box=None,
+        padding=(0, 1),
+        expand=True,
+    )
+    table.add_column("Time", style="dim", width=8, no_wrap=True)
+    table.add_column("Message", overflow="ellipsis", no_wrap=True)
+
+    # Get recent logs
+    recent = logs[-max_lines:] if len(logs) > max_lines else logs
+
+    for entry in recent:
+        time_str = entry.timestamp.strftime("%H:%M:%S")
+
+        # Color based on level
+        if entry.level == "error":
+            style = "red"
+        elif entry.level == "warning":
+            style = "yellow"
+        elif entry.level == "debug":
+            style = "dim"
+        else:
+            style = "white"
+
+        # Truncate long messages
+        msg = entry.message
+        if len(msg) > 80:
+            msg = msg[:77] + "..."
+
+        table.add_row(time_str, Text(msg, style=style))
+
+    # Fill empty rows
+    for _ in range(max_lines - len(recent)):
+        table.add_row("", "")
+
+    return Panel(table, title="[bold magenta]Backend Logs[/bold magenta]", border_style="magenta")
+
+
 def build_display(
     model: str,
     backend: str,
@@ -241,12 +288,14 @@ def build_display(
     """Build the complete display."""
     inference_stats = collector.get_inference_stats()
     hardware_stats = collector.get_hardware_stats()
+    log_entries = collector.logs.get_entries()
 
     return Group(
         build_header(model, backend, host, port),
         build_inference_panel(inference_stats),
         build_hardware_panel(hardware_stats),
         build_requests_panel(inference_stats),
+        build_logs_panel(log_entries),
         Text("Press Ctrl+C to stop", style="dim", justify="center"),
     )
 

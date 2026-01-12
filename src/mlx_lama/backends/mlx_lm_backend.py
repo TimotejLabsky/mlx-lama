@@ -2,10 +2,10 @@
 
 import subprocess
 import sys
-from typing import Generator
+from collections.abc import Generator
 
-from .base import Backend, BackendCapabilities, InstallOption, InstallMethod
 from . import register_backend
+from .base import Backend, BackendCapabilities, InstallMethod, InstallOption
 
 
 class MlxLmBackend(Backend):
@@ -59,7 +59,7 @@ class MlxLmBackend(Backend):
     ) -> Generator[str, None, None]:
         """Generate text using mlx-lm."""
         try:
-            from mlx_lm import load, generate
+            from mlx_lm import generate, load
         except ImportError:
             raise RuntimeError(
                 "mlx-lm is not installed. Install with: uv add mlx-lm"
@@ -115,8 +115,8 @@ class MlxLmBackend(Backend):
 
         process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
         return process

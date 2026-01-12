@@ -497,12 +497,16 @@ def serve_model(
                 import threading
                 import time
 
-                from .stats import get_stats_collector, reset_stats_collector
+                from .stats import LogParser, get_stats_collector, reset_stats_collector
                 from .top import LiveTop
 
                 # Reset stats for fresh start
                 reset_stats_collector()
                 collector = get_stats_collector()
+
+                # Start log parser to capture backend stdout/stderr
+                log_parser = LogParser(process, collector)
+                log_parser.start()
 
                 def on_request_complete(
                     endpoint: str, prompt_tokens: int, completion_tokens: int, latency_ms: float
@@ -556,6 +560,7 @@ def serve_model(
                     pass
                 finally:
                     live_top.stop()
+                    log_parser.stop()
                     console.print("\n[dim]Stopping server...[/dim]")
                     backend_instance.stop_server(process)
                     print_success("Server stopped")
