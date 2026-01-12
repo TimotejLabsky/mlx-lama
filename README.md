@@ -2,9 +2,9 @@
 
 > **Disclaimer:** This project was generated and tested on a single machine (Apple Silicon Mac). It is pending full review and broader testing. Use at your own discretion.
 
-Ollama-compatible CLI for MLX models on Apple Silicon.
+Ollama-compatible CLI for MLX models on Apple Silicon with multiple backend support.
 
-Run LLMs locally with native Apple Silicon performance using MLX, with the familiar Ollama command-line interface.
+Run LLMs locally with native Apple Silicon performance using MLX, with the familiar Ollama command-line interface. Supports multiple inference backends (`mlx-lm`, `vllm-mlx`, `ollama`) that can be hot-swapped at runtime.
 
 ## Features
 
