@@ -611,20 +611,60 @@ def serve_model(
                                         )
                                         current_log_parser.start()
 
-                                        # Wait for new backend
-                                        console.print("[dim]Waiting for backend to start...[/dim]")
-                                        if wait_for_server(host, backend_port, timeout=120.0):
+                                        # Wait for new backend with live log output
+                                        console.print(
+                                            "[dim]Waiting for backend to start...[/dim]\n"
+                                        )
+
+                                        # Show logs while waiting
+                                        import httpx
+                                        start_wait = time.time()
+                                        last_log_count = 0
+                                        server_ready = False
+
+                                        while time.time() - start_wait < 120.0:
+                                            # Show new log entries
+                                            logs = collector.logs.get_entries()
+                                            if len(logs) > last_log_count:
+                                                for entry in logs[last_log_count:]:
+                                                    if entry.level == "error":
+                                                        style = "red"
+                                                    else:
+                                                        style = "dim"
+                                                    msg = entry.message
+                                                    console.print(f"  [{style}]{msg}[/{style}]")
+                                                last_log_count = len(logs)
+
+                                            # Check if server is ready
+                                            try:
+                                                url = f"http://{host}:{backend_port}/v1/models"
+                                                resp = httpx.get(url, timeout=1.0)
+                                                if resp.status_code == 200:
+                                                    server_ready = True
+                                                    break
+                                            except Exception:
+                                                pass
+
+                                            time.sleep(1.0)
+
+                                        if server_ready:
+                                            console.print(
+                                                "\n[green]Backend started successfully![/green]"
+                                            )
                                             collector.logs.add(
                                                 f"Backend switched to {new_backend_name}",
                                                 level="info",
                                                 source="system",
                                             )
+                                            time.sleep(1)  # Brief pause to show success
                                         else:
+                                            console.print("\n[red]Backend startup timed out![/red]")
                                             collector.logs.add(
                                                 "Backend startup failed!",
                                                 level="error",
                                                 source="system",
                                             )
+                                            time.sleep(2)  # Longer pause for error
 
                                         # Update TUI with new backend name
                                         tui.set_model_info(model, new_backend_name)
