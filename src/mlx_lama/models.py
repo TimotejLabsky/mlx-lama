@@ -612,40 +612,55 @@ def serve_model(
                                         current_log_parser.start()
 
                                         # Wait for new backend with live log output
-                                        console.print(
-                                            "[dim]Waiting for backend to start...[/dim]\n"
-                                        )
-
-                                        # Show logs while waiting
                                         import httpx
+                                        from rich.live import Live
+                                        from rich.text import Text
+
                                         start_wait = time.time()
-                                        last_log_count = 0
                                         server_ready = False
+                                        max_log_lines = 4
 
-                                        while time.time() - start_wait < 120.0:
-                                            # Show new log entries
+                                        def get_log_display():
+                                            """Get formatted log lines for display."""
                                             logs = collector.logs.get_entries()
-                                            if len(logs) > last_log_count:
-                                                for entry in logs[last_log_count:]:
-                                                    if entry.level == "error":
-                                                        style = "red"
-                                                    else:
-                                                        style = "dim"
-                                                    msg = entry.message
-                                                    console.print(f"  [{style}]{msg}[/{style}]")
-                                                last_log_count = len(logs)
+                                            # Filter out health check noise
+                                            filtered = [
+                                                e for e in logs
+                                                if "/v1/models" not in e.message
+                                            ]
+                                            # Get last N lines
+                                            recent = filtered[-max_log_lines:]
+                                            lines = []
+                                            for entry in recent:
+                                                lvl = entry.level
+                                                style = "red" if lvl == "error" else "dim"
+                                                msg = entry.message
+                                                lines.append(f"[{style}]  {msg}[/{style}]")
+                                            if lines:
+                                                return "\n".join(lines)
+                                            return "[dim]  (waiting for logs...)[/dim]"
 
-                                            # Check if server is ready
-                                            try:
-                                                url = f"http://{host}:{backend_port}/v1/models"
-                                                resp = httpx.get(url, timeout=1.0)
-                                                if resp.status_code == 200:
-                                                    server_ready = True
-                                                    break
-                                            except Exception:
-                                                pass
+                                        with Live(
+                                            Text("Waiting for backend..."),
+                                            console=console,
+                                            refresh_per_second=2,
+                                        ) as live:
+                                            while time.time() - start_wait < 120.0:
+                                                # Update log display
+                                                live.update(Text.from_markup(get_log_display()))
 
-                                            time.sleep(1.0)
+                                                # Check if server is ready
+                                                try:
+                                                    url = f"http://{host}:{backend_port}/v1/models"
+                                                    with httpx.Client(timeout=2.0) as client:
+                                                        resp = client.get(url)
+                                                        if resp.status_code == 200:
+                                                            server_ready = True
+                                                            break
+                                                except Exception:
+                                                    pass
+
+                                                time.sleep(1.0)
 
                                         if server_ready:
                                             console.print(
