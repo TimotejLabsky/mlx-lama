@@ -1,7 +1,9 @@
 """Model management - pull, list, remove, show, run, serve."""
 
 import os
+import random
 import shutil
+import socket
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +31,19 @@ from .progress import (
 from .registry import get_registry
 
 console = Console()
+
+
+def get_free_port() -> int:
+    """Get a random free port in the ephemeral range (49152-65535)."""
+    for _ in range(10):
+        port = random.randint(49152, 65535)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError("Could not find free port")
 
 
 def get_hf_cache_dir() -> Path:
@@ -448,9 +463,9 @@ def serve_model(
         )
         return
 
-    # When using --top, proxy runs on user port and backend on port+1000
+    # When using TUI, proxy runs on user port and backend on random high port
     if top:
-        backend_port = port + 1000
+        backend_port = get_free_port()
         proxy_port = port
     else:
         backend_port = port

@@ -1,10 +1,9 @@
 """Ollama-compatible CLI for mlx-lama."""
 
+
 import typer
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
-from typing import Optional
 
 from . import __version__
 from .config import get_config
@@ -27,7 +26,7 @@ def version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
-    version: Optional[bool] = typer.Option(
+    version: bool | None = typer.Option(
         None,
         "--version",
         "-v",
@@ -43,7 +42,7 @@ def main(
 @app.command()
 def pull(
     model: str = typer.Argument(..., help="Model name (e.g., qwen-coder:32b)"),
-    backend: Optional[str] = typer.Option(
+    backend: str | None = typer.Option(
         None, "--backend", "-b", help="Preferred backend for this model"
     ),
 ) -> None:
@@ -56,8 +55,8 @@ def pull(
 @app.command()
 def run(
     model: str = typer.Argument(..., help="Model name to run"),
-    prompt: Optional[str] = typer.Argument(None, help="Prompt (omit for interactive mode)"),
-    backend: Optional[str] = typer.Option(
+    prompt: str | None = typer.Argument(None, help="Prompt (omit for interactive mode)"),
+    backend: str | None = typer.Option(
         None, "--backend", "-b", help="Backend to use"
     ),
 ) -> None:
@@ -72,11 +71,11 @@ def serve(
     model: str = typer.Argument(..., help="Model name to serve"),
     port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
     host: str = typer.Option("127.0.0.1", "--host", "-H", help="Host to bind to"),
-    backend: Optional[str] = typer.Option(
+    backend: str | None = typer.Option(
         None, "--backend", "-b", help="Backend to use"
     ),
     top: bool = typer.Option(
-        False, "--top", "-t", help="Enable live monitoring TUI (like htop)"
+        True, "--top/--no-top", help="Live monitoring TUI (default: on)"
     ),
 ) -> None:
     """Start an OpenAI-compatible API server."""
@@ -167,7 +166,7 @@ def ps() -> None:
 
 @app.command()
 def stop(
-    model: Optional[str] = typer.Argument(None, help="Model to stop (stops all if omitted)"),
+    model: str | None = typer.Argument(None, help="Model to stop (stops all if omitted)"),
 ) -> None:
     """Stop running model server(s)."""
     from .process import stop_server
@@ -240,7 +239,7 @@ def backends(
 @app.command()
 def install(
     backend: str = typer.Argument(..., help="Backend to install (mlx-lm, vllm, ollama)"),
-    method: Optional[str] = typer.Option(
+    method: str | None = typer.Option(
         None,
         "--method",
         "-m",
@@ -249,7 +248,7 @@ def install(
 ) -> None:
     """Install a backend."""
     from .backends import get_available_backends, install_backend
-    from .progress import print_success, print_error, print_info
+    from .progress import print_error, print_info, print_success
 
     # Check if already installed
     backends_list = get_available_backends()
