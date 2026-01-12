@@ -471,8 +471,11 @@ def serve_model(
             backend=backend_instance.name,
         )
 
-        # Wait for backend server to be ready
-        if wait_for_server(host, backend_port):
+        # Wait for backend server to be ready (can take 60s+ for mlx-lm)
+        with status_spinner("Loading model (this may take a minute)..."):
+            server_ready = wait_for_server(host, backend_port)
+
+        if server_ready:
             if top:
                 # Start live monitoring TUI with stats-capturing proxy
                 import asyncio

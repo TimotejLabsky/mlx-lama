@@ -6,13 +6,12 @@ import signal
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import httpx
 from rich.console import Console
 
 from .config import get_config
-from .progress import print_success, print_error, print_warning
+from .progress import print_error, print_success, print_warning
 
 console = Console()
 
@@ -119,7 +118,7 @@ def get_running_servers() -> list[dict]:
     return running
 
 
-def stop_server(model: Optional[str] = None) -> None:
+def stop_server(model: str | None = None) -> None:
     """Stop running server(s).
 
     Args:
@@ -170,8 +169,8 @@ def stop_server(model: Optional[str] = None) -> None:
 def wait_for_server(
     host: str,
     port: int,
-    timeout: float = 60.0,
-    interval: float = 0.5,
+    timeout: float = 120.0,
+    interval: float = 1.0,
 ) -> bool:
     """Wait for a server to be ready.
 
