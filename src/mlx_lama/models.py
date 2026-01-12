@@ -544,77 +544,109 @@ def serve_model(
 
                 print_success(f"Server running at http://{host}:{port}")
 
+                # Import backend menu
+                from .top import show_backend_menu
+
                 # Track mutable state for reload
-                server_state = {
-                    "process": process,
-                    "log_parser": log_parser,
-                    "should_quit": False,
-                }
-
-                def handle_reload():
-                    """Reload the backend server."""
-                    nonlocal server_state
-                    old_process = server_state["process"]
-                    old_parser = server_state["log_parser"]
-
-                    # Stop current backend
-                    old_parser.stop()
-                    backend_instance.stop_server(old_process)
-
-                    # Clear logs and reset stats for fresh start
-                    collector.logs.clear()
-                    collector.logs.add("Reloading backend...", level="info", source="system")
-
-                    # Start new backend on same port
-                    new_process = backend_instance.serve(
-                        str(model_path), host=host, port=backend_port
-                    )
-
-                    # Start new log parser
-                    new_parser = LogParser(new_process, collector)
-                    new_parser.start()
-
-                    # Wait for new backend to be ready
-                    if wait_for_server(host, backend_port, timeout=120.0):
-                        collector.logs.add(
-                            "Backend reloaded successfully", level="info", source="system"
-                        )
-                    else:
-                        collector.logs.add(
-                            "Backend reload failed!", level="error", source="system"
-                        )
-
-                    server_state["process"] = new_process
-                    server_state["log_parser"] = new_parser
-
-                def handle_quit():
-                    """Handle quit request."""
-                    server_state["should_quit"] = True
+                current_process = process
+                current_log_parser = log_parser
+                current_backend = backend_instance
 
                 live_top = LiveTop(
                     model=model,
-                    backend=backend_instance.name,
+                    backend=current_backend.name,
                     host=host,
-                    port=port,  # Show user-specified port in UI
-                    on_reload=handle_reload,
-                    on_quit=handle_quit,
+                    port=port,
                 )
 
                 try:
-                    with live_top.start(console):
-                        while (
-                            server_state["process"].poll() is None
-                            and not server_state["should_quit"]
-                        ):
-                            live_top.update()
+                    with live_top.start(console) as tui:
+                        while current_process.poll() is None:
+                            # Check for keyboard input
+                            action = tui.check_keyboard()
+
+                            if action == "reload":
+                                # Pause TUI to show menu
+                                tui.pause()
+                                console.clear()
+
+                                # Show backend selection menu
+                                new_backend_name = show_backend_menu(
+                                    console, current_backend.name
+                                )
+
+                                if new_backend_name and new_backend_name != current_backend.name:
+                                    # Get new backend
+                                    new_backend = get_backend(new_backend_name)
+                                    if new_backend and new_backend.is_available():
+                                        console.print(
+                                            f"\n[yellow]Stopping {current_backend.name}...[/yellow]"
+                                        )
+
+                                        # Stop current backend
+                                        current_log_parser.stop()
+                                        current_backend.stop_server(current_process)
+
+                                        # Clear logs
+                                        collector.logs.clear()
+                                        collector.logs.add(
+                                            f"Switching to {new_backend_name}...",
+                                            level="info",
+                                            source="system",
+                                        )
+
+                                        console.print(
+                                            f"[yellow]Starting {new_backend_name}...[/yellow]"
+                                        )
+
+                                        # Start new backend
+                                        current_process = new_backend.serve(
+                                            str(model_path), host=host, port=backend_port
+                                        )
+                                        current_backend = new_backend
+
+                                        # Start new log parser
+                                        current_log_parser = LogParser(
+                                            current_process, collector
+                                        )
+                                        current_log_parser.start()
+
+                                        # Wait for new backend
+                                        console.print("[dim]Waiting for backend to start...[/dim]")
+                                        if wait_for_server(host, backend_port, timeout=120.0):
+                                            collector.logs.add(
+                                                f"Backend switched to {new_backend_name}",
+                                                level="info",
+                                                source="system",
+                                            )
+                                        else:
+                                            collector.logs.add(
+                                                "Backend startup failed!",
+                                                level="error",
+                                                source="system",
+                                            )
+
+                                        # Update TUI with new backend name
+                                        tui.set_model_info(model, new_backend_name)
+                                    else:
+                                        console.print(
+                                            f"[red]Backend {new_backend_name} not available[/red]"
+                                        )
+                                        time.sleep(1)
+
+                                # Resume TUI
+                                tui.resume()
+
+                            tui.update()
                             time.sleep(0.5)
+
                 except KeyboardInterrupt:
                     pass
                 finally:
                     live_top.stop()
-                    server_state["log_parser"].stop()
+                    current_log_parser.stop()
                     console.print("\n[dim]Stopping server...[/dim]")
-                    backend_instance.stop_server(server_state["process"])
+                    current_backend.stop_server(current_process)
                     print_success("Server stopped")
             else:
                 # Normal mode (no --top)

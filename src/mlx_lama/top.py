@@ -5,11 +5,11 @@ import sys
 import termios
 import threading
 import tty
-from collections.abc import Callable
 
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
+from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
@@ -298,10 +298,14 @@ def build_display(
 
     # Build footer with status and keys
     if status == "reloading":
-        footer = Text("Reloading model...", style="yellow bold", justify="center")
+        footer = Text("Reloading backend...", style="yellow bold", justify="center")
+    elif status == "stopping":
+        footer = Text("Stopping backend...", style="yellow bold", justify="center")
+    elif status == "starting":
+        footer = Text("Starting backend...", style="yellow bold", justify="center")
     else:
         footer = Text(
-            "[r] Reload  [q] Quit",
+            "[r] Switch backend    [Ctrl+C] Quit",
             style="dim",
             justify="center",
         )
@@ -316,51 +320,6 @@ def build_display(
     )
 
 
-class KeyboardListener(threading.Thread):
-    """Non-blocking keyboard listener for TUI commands."""
-
-    def __init__(self, on_key: Callable[[str], None]):
-        super().__init__(daemon=True)
-        self.on_key = on_key
-        self._stop_event = threading.Event()
-        self._old_settings = None
-
-    def run(self) -> None:
-        """Listen for keyboard input."""
-        try:
-            # Save terminal settings
-            fd = sys.stdin.fileno()
-            self._old_settings = termios.tcgetattr(fd)
-            # Set terminal to raw mode
-            tty.setcbreak(fd)
-
-            while not self._stop_event.is_set():
-                # Check if input is available
-                if select.select([sys.stdin], [], [], 0.1)[0]:
-                    char = sys.stdin.read(1)
-                    if char:
-                        self.on_key(char.lower())
-
-        except Exception:
-            pass  # Terminal doesn't support raw mode
-        finally:
-            self._restore_terminal()
-
-    def _restore_terminal(self) -> None:
-        """Restore terminal settings."""
-        if self._old_settings:
-            try:
-                fd = sys.stdin.fileno()
-                termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
-            except Exception:
-                pass
-
-    def stop(self) -> None:
-        """Stop the listener."""
-        self._stop_event.set()
-        self._restore_terminal()
-
-
 class LiveTop:
     """Live monitoring display for the server."""
 
@@ -371,36 +330,26 @@ class LiveTop:
         host: str = "127.0.0.1",
         port: int = 8000,
         refresh_rate: float = 2.0,
-        on_reload: Callable[[], None] | None = None,
-        on_quit: Callable[[], None] | None = None,
     ):
         self.model = model
         self.backend = backend
         self.host = host
         self.port = port
         self.refresh_rate = refresh_rate
-        self.on_reload = on_reload
-        self.on_quit = on_quit
         self.collector = get_stats_collector()
         self._stop_event = threading.Event()
         self._live: Live | None = None
-        self._keyboard_listener: KeyboardListener | None = None
+        self._console: Console | None = None
         self._status = "running"
+        # Pending action set by keyboard input
+        self._pending_action: str | None = None
+        self._old_terminal_settings = None
 
-    def _handle_key(self, key: str) -> None:
-        """Handle keyboard input."""
-        if key == "r" and self.on_reload:
-            self._status = "reloading"
-            self.update()
-            self.on_reload()
-            self._status = "running"
-        elif key == "q" and self.on_quit:
-            self.on_quit()
-
-    def start(self, console: Console | None = None) -> Live:
-        """Start the live display and return the Live context."""
+    def start(self, console: Console | None = None) -> "LiveTop":
+        """Start the live display and return self for context manager."""
         if console is None:
             console = Console()
+        self._console = console
 
         self._live = Live(
             build_display(
@@ -415,12 +364,78 @@ class LiveTop:
             refresh_per_second=self.refresh_rate,
             screen=True,  # Use alternate screen (like htop)
         )
+        return self
 
-        # Start keyboard listener
-        self._keyboard_listener = KeyboardListener(self._handle_key)
-        self._keyboard_listener.start()
+    def __enter__(self) -> "LiveTop":
+        """Enter the live display context."""
+        if self._live:
+            self._live.__enter__()
+            # Enable keyboard input detection
+            self._setup_keyboard()
+        return self
 
-        return self._live
+    def __exit__(self, *args) -> None:
+        """Exit the live display context."""
+        self._restore_keyboard()
+        if self._live:
+            self._live.__exit__(*args)
+
+    def _setup_keyboard(self) -> None:
+        """Set up terminal for keyboard detection."""
+        try:
+            fd = sys.stdin.fileno()
+            self._old_terminal_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except Exception:
+            self._old_terminal_settings = None
+
+    def _restore_keyboard(self) -> None:
+        """Restore terminal settings."""
+        if self._old_terminal_settings:
+            try:
+                fd = sys.stdin.fileno()
+                termios.tcsetattr(fd, termios.TCSADRAIN, self._old_terminal_settings)
+            except Exception:
+                pass
+            self._old_terminal_settings = None
+
+    def check_keyboard(self) -> str | None:
+        """Check for keyboard input. Returns action: 'reload', 'quit', or None."""
+        try:
+            if select.select([sys.stdin], [], [], 0)[0]:
+                char = sys.stdin.read(1).lower()
+                if char == "r":
+                    return "reload"
+                elif char == "q":
+                    return "quit"
+        except Exception:
+            pass
+        return None
+
+    def pause(self) -> None:
+        """Temporarily exit the TUI for user interaction."""
+        self._restore_keyboard()
+        if self._live:
+            self._live.stop()
+
+    def resume(self) -> None:
+        """Resume the TUI after user interaction."""
+        if self._live and self._console:
+            self._live = Live(
+                build_display(
+                    self.model,
+                    self.backend,
+                    self.host,
+                    self.port,
+                    self.collector,
+                    self._status,
+                ),
+                console=self._console,
+                refresh_per_second=self.refresh_rate,
+                screen=True,
+            )
+            self._live.start()
+            self._setup_keyboard()
 
     def update(self) -> None:
         """Update the display."""
@@ -439,12 +454,54 @@ class LiveTop:
     def set_status(self, status: str) -> None:
         """Set the status displayed in footer."""
         self._status = status
-        self.update()
+
+    def set_model_info(self, model: str, backend: str) -> None:
+        """Update the model and backend info shown in header."""
+        self.model = model
+        self.backend = backend
 
     def stop(self) -> None:
         """Stop the live display."""
         self._stop_event.set()
-        if self._keyboard_listener:
-            self._keyboard_listener.stop()
+        self._restore_keyboard()
         if self._live:
             self._live.stop()
+
+
+def show_backend_menu(console: Console, current_backend: str) -> str | None:
+    """Show backend selection menu.
+
+    Returns selected backend name or None if cancelled.
+    """
+    from .backends import get_available_backends
+
+    backends = get_available_backends()
+    available = [b for b in backends if b["available"]]
+
+    if not available:
+        console.print("[red]No backends available![/red]")
+        return None
+
+    console.print("\n[bold]Select backend:[/bold]\n")
+
+    for i, b in enumerate(available, 1):
+        marker = "[green]●[/green]" if b["name"] == current_backend else "[dim]○[/dim]"
+        console.print(f"  {marker} [{i}] {b['name']} - {b['description']}")
+
+    console.print("\n  [dim][0] Cancel[/dim]")
+    console.print()
+
+    try:
+        choice = Prompt.ask(
+            "Enter number",
+            default="0",
+        )
+        idx = int(choice)
+        if idx == 0:
+            return None
+        if 1 <= idx <= len(available):
+            return available[idx - 1]["name"]
+    except (ValueError, KeyboardInterrupt):
+        pass
+
+    return None
